@@ -38,7 +38,6 @@ from monai.transforms import (
 
 from monai.metrics import DiceMetric
 from monai.config import print_config
-from monai.networks.nets import UNETR
 from monai.data import (
     Dataset,
     DataLoader,
@@ -76,7 +75,8 @@ parser.add_argument("--batch_size_train", type=int, default=10, help="batch size
 parser.add_argument("--model_save_name", type=str, default="unetr_v5_cos", help="model save name")
 parser.add_argument("--batch_size_validation", type=int, default=5, help="batch size validation data")
 parser.add_argument("--json_name", type=str, default=r"dataset.json", help="name of the file used to map data splits")
-parser.add_argument("--data_dir", type=str, default=r"C:\Users\iris\Desktop\GRACE\Data", help="directory the dataset is in")
+parser.add_argument("--data_dir", type=str, default=r"C:\Users\51236\Documents\CV\grace\Data", help="directory the dataset is in")
+parser.add_argument("--model", type=str, default="unetr", help="unet unetr swinunetr aftunet")
 args = parser.parse_args()
 
 split_JSON = args.json_name #"dataset.json". Make sure that the JSON file, with exact name, is in the data_dir folder
@@ -202,18 +202,59 @@ val_loader = DataLoader(
 #set up gpu device and unetr model
 
 # build base model
-base_model = UNETR(
-    in_channels=1,
-    out_channels=args.N_classes, #12 for all tissues
-    img_size=(args.spatial_size, args.spatial_size, args.spatial_size),
-    feature_size=16,
-    hidden_size=768,
-    mlp_dim=3072,
-    num_heads=12,
-    norm_name="instance",
-    res_block=True,
-    dropout_rate=0.0,
-)
+if args.model.lower() == "unet":
+    from monai.networks.nets import UNet
+    base_model = UNet(
+        spatial_dims=3,
+        in_channels=1,
+        out_channels=args.N_classes,
+        # 根據 feature_size=16 設置典型的通道數列，確保參數量與 Transformer 類模型有可比性
+        channels=(16, 32, 64, 128, 256), 
+        strides=(2, 2, 2, 2),
+        num_res_units=2,
+        norm="instance",
+    )
+elif args.model.lower() == "unetr":
+    from monai.networks.nets import UNETR
+    base_model = UNETR(
+        in_channels=1,
+        out_channels=args.N_classes, #12 for all tissues
+        img_size=(args.spatial_size, args.spatial_size, args.spatial_size),
+        feature_size=16,
+        hidden_size=768,
+        mlp_dim=3072,
+        num_heads=12,
+        norm_name="instance",
+        res_block=True,
+        dropout_rate=0.0,
+    )
+elif args.model.lower() == "swinunetr":
+    from monai.networks.nets import SwinUNETR
+    base_model = SwinUNETR(
+        in_channels=1,
+        out_channels=args.N_classes,
+        feature_size=24,              # 根據原始碼預設為 24
+        use_checkpoint=True,          # 開啟梯度檢查點 (節省顯存)
+        spatial_dims=3                # 指定為 3D
+    )
+elif args.model.lower() == "aftunet":
+    from model.aftunet import AFTUNET
+    base_model = AFTUNET(
+        in_channels=1,
+        out_channels=args.N_classes,
+        img_size=(args.spatial_size, args.spatial_size, args.spatial_size),
+        feature_size=16,     # 保持與 UNETR 一致
+        hidden_size=768,     # 保持與 UNETR 一致
+        mlp_dim=3072,        # 保持與 UNETR 一致
+        num_heads=12,        # 保持與 UNETR 一致
+        norm_name="instance",
+        res_block=True,
+        dropout_rate=0.0,
+        spatial_dims=3,
+    )
+else:
+    raise ValueError(f"\n{'='*50}\n不知道你要用哪個模型拉!\n{'='*50}\n")
+
 
 # Wrap with DataParallel only when CUDA is available and multiple GPUs requested.
 if device.type == "cuda" and args.num_gpu > 1 and torch.cuda.is_available():
@@ -260,6 +301,10 @@ def validation(epoch_iterator_val):
 
 #-----------------------------------
 
+from torch.utils.tensorboard import SummaryWriter
+output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs', args.model, time.strftime("%Y%m%d-%H%M%S"))
+writer = SummaryWriter(log_dir=output_dir)
+
 def train(global_step, train_loader, dice_val_best, global_step_best):
     model.train()
     epoch_loss = 0
@@ -280,6 +325,7 @@ def train(global_step, train_loader, dice_val_best, global_step_best):
         epoch_iterator.set_description(
             "Training (%d / %d Steps) (loss=%2.5f)" % (global_step, max_iterations, loss_val)
         )
+        writer.add_scalar('Loss/Training Loss', loss_val, global_step)
         if (
             global_step % eval_num == 0 and global_step != 0
         ) or global_step == max_iterations:
@@ -290,6 +336,7 @@ def train(global_step, train_loader, dice_val_best, global_step_best):
             epoch_loss /= step
             epoch_loss_values.append(epoch_loss)
             metric_values.append(dice_val)
+            writer.add_scalar('Loss/dice', dice_val, global_step)
             if dice_val > dice_val_best:
                 dice_val_best = dice_val
                 global_step_best = global_step
